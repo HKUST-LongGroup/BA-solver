@@ -1,7 +1,7 @@
 <h1 align="center"> Bi-Anchor Interpolation Solver for Accelerating <br> Generative Modeling
 </h1>
 
-[![arXiv](https://img.shields.io/badge/arXiv%20paper-2410.06940-b31b1b.svg)](https://arxiv.org/abs/2601.21542)&nbsp;[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model-ffd21e)](https://huggingface.co/Daxuxu36/BA-solver-SideNet)
+[![arXiv](https://img.shields.io/badge/arXiv%20paper-2601.21542-b31b1b.svg)](https://arxiv.org/abs/2601.21542)&nbsp;[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model-ffd21e)](https://huggingface.co/Daxuxu36/BA-solver-SideNet)
 
 <!-- [![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/representation-alignment-for-generation/image-generation-on-imagenet-256x256)] -->
 
@@ -29,7 +29,7 @@ pip install -r requirements.txt
 
 #### Dataset download
 
-The experiments for [ImageNet](https://www.kaggle.com/competitions/imagenet-object-localization-challenge/data) are provided. You can place the data that you want and can specifiy it via `--data-dir` arguments in training scripts. We didn't apply preprocessing process for extracting latent in our experiments.
+The experiments for [ImageNet](https://www.kaggle.com/competitions/imagenet-object-localization-challenge/data) are provided. You can place the data that you want and can specifiy it via `--data-dir` arguments (e.g., "../train") in training scripts. We didn't apply preprocessing process for extracting latent in our experiments.
 
 ### 3. Training
 
