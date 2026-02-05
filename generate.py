@@ -94,7 +94,7 @@ def main(args):
     side_model = BASideNet(
         in_channels=args.SideNet_in_channels, 
         base_channels=args.SideNet_base_channels,
-        h_emb_dim=SideNet_h_emb_dim, 
+        h_emb_dim=args.SideNet_h_emb_dim, 
         num_layers=args.SideNet_depth      
     ).to(device)
 
