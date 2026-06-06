@@ -1,12 +1,7 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
 
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-Samples from a SiT-REPA model using the BA-solver. Done.
-"""
 import torch
 import torch.distributed as dist
 from models.sit import SiT_models
@@ -98,37 +93,62 @@ def main(args):
         num_layers=args.SideNet_depth      
     ).to(device)
 
+    side_model = side_model.to(memory_format=torch.channels_last)
+
     assert args.side_ckpt is not None, "Must provide --side-ckpt for BA generation"
-    
     side_ckpt = torch.load(args.side_ckpt, map_location=f'cuda:{device}')
     
-    # In training script, SideNet is saved under 'side_model' key
-    if 'side_model' in side_ckpt:
+    # ============================================================
+    # EMA Modification: Extract EMA weights if requested
+    # ============================================================
+    if args.use_ema and 'ema_side_model' in side_ckpt:
+        if rank == 0:
+            print("=> Loading EMA weights for SideNet...")
+        side_state_dict = side_ckpt['ema_side_model']
+    elif 'side_model' in side_ckpt:
+        if rank == 0 and args.use_ema:
+            print("=> Warning: --use-ema is True, but 'ema_side_model' was not found in checkpoint. Falling back to standard 'side_model' weights.")
+        elif rank == 0:
+            print("=> Loading standard weights for SideNet...")
         side_state_dict = side_ckpt['side_model']
     else:
+        if rank == 0:
+            print("=> Loading raw weights for SideNet...")
         side_state_dict = side_ckpt
 
-    # Remove 'module.' prefix if present (from DDP training)
     side_state_dict = {k.replace("module.", ""): v for k, v in side_state_dict.items()}
-    
+
     side_model.load_state_dict(side_state_dict)
     side_model.eval()
 
+    side_model = torch.compile(
+        side_model, 
+        mode="max-autotune", 
+        fullgraph=True, 
+    )
+
     if rank == 0:
         print(f"Loaded Base SiT from {args.base_ckpt}")
-        print(f"Loaded Side BA model from {args.side_ckpt}")
+        print(f"Loaded Side BA model from {args.side_ckpt} (Optimized with CUDA Graphs & Channels Last)")
 
     # ============================================================
     # 3. Setup VAE
     # ============================================================
-    vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
+    # vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
+    vae_local_path = "./checkpoint/sd-vae-ft-ema"
+
+    vae = AutoencoderKL.from_pretrained(
+        vae_local_path,
+        local_files_only=True
+    ).to(device)
     assert args.cfg_scale >= 1.0, "In almost all cases, cfg_scale be >= 1.0"
 
     # Create folder to save samples
     model_string_name = args.model.replace("/", "-")
-    # Naming convention based on Side Checkpoint
+    # Naming convention based on Side Checkpoint and EMA status
     ckpt_string_name = os.path.basename(args.side_ckpt).replace(".pt", "")
-    folder_name = f"BA-{ckpt_string_name}-steps-{args.num_steps}-cfg-{args.cfg_scale}"
+    ema_str = "EMA-" if args.use_ema else ""
+    folder_name = f"BA-{ema_str}{ckpt_string_name}-steps-{args.num_steps}-cfg-{args.cfg_scale}"
     sample_folder_dir = f"{args.sample_dir}/{folder_name}"
     
     if rank == 0:
@@ -160,23 +180,27 @@ def main(args):
     for _ in pbar:
         # Sample inputs:
         z = torch.randn(n, base_model.in_channels, latent_size, latent_size, device=device)
-        y = torch.randint(0, args.num_classes, (n,), device=device)
+        global_indices = torch.arange(total, total + global_batch_size, device=device)
+        local_indices = global_indices[rank:global_batch_size:dist.get_world_size()]
+        y = local_indices % args.num_classes
 
         with torch.no_grad():
             # ============================================================
             # BA Sampler Call
             # ============================================================
-            samples = BA_bidirectional_anchor_sampler(
-                base_model=base_model,
-                side_model=side_model,
-                latents=z,
-                y=y,
-                cfg_interval_end=args.cfg_interval_end,
-                cfg_interval_start=args.cfg_interval_start,
-                num_steps=args.num_steps,
-                cfg_scale=args.cfg_scale
-            ).to(torch.float32)
-
+            with torch.autocast(device_type="cuda", dtype=torch.float16 if args.tf32 else torch.float32):
+                samples = BA_bidirectional_anchor_sampler(
+                    base_model=base_model,
+                    side_model=side_model,
+                    latents=z,
+                    y=y,
+                    cfg_interval_end=args.cfg_interval_end,
+                    cfg_interval_start=args.cfg_interval_start,
+                    num_steps=args.num_steps,
+                    cfg_scale=args.cfg_scale
+                )
+            samples = samples.to(torch.float32)
+            
             # Decode
             samples = vae.decode((samples - latents_bias) / latents_scale).sample
             samples = (samples + 1) / 2.
@@ -226,8 +250,11 @@ if __name__ == "__main__":
     # Misc
     parser.add_argument("--tf32", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--legacy", action=argparse.BooleanOptionalAction, default=False)
+    
+    # EMA
+    parser.add_argument("--use-ema", action=argparse.BooleanOptionalAction, default=True, help="Use EMA weights for inference if available in checkpoint.")
 
-    #SideNet
+    # SideNet
     parser.add_argument("--SideNet-depth", type=int, default=4)
     parser.add_argument("--SideNet-in-channels", type=int, default=4)
     parser.add_argument("--SideNet-base-channels", type=int, default=256)
