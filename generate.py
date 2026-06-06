@@ -134,13 +134,8 @@ def main(args):
     # ============================================================
     # 3. Setup VAE
     # ============================================================
-    # vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
-    vae_local_path = "./checkpoint/sd-vae-ft-ema"
-
-    vae = AutoencoderKL.from_pretrained(
-        vae_local_path,
-        local_files_only=True
-    ).to(device)
+    
+    vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
     assert args.cfg_scale >= 1.0, "In almost all cases, cfg_scale be >= 1.0"
 
     # Create folder to save samples
