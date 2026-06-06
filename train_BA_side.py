@@ -36,6 +36,30 @@ def array2grid(x):
     x = x.mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to('cpu', torch.uint8).numpy()
     return x
 
+# ============================================================
+# EMA 
+# ============================================================
+class EMAModel:
+    def __init__(self, model, decay=0.9999):
+        self.decay = decay
+        self.model = deepcopy(model)
+        self.model.eval()
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+    @torch.no_grad()
+    def step(self, model):
+        model_params = dict(model.named_parameters())
+        ema_params = dict(self.model.named_parameters())
+        for name, param in model_params.items():
+            if name in ema_params:
+                ema_params[name].mul_(self.decay).add_(
+                    param.data.to(ema_params[name].dtype), alpha=1 - self.decay
+                )
+    
+    def to(self, device):
+        self.model.to(device)
+
 def main(args):
     # 1. Setup Accelerator
     logging_dir = Path(args.output_dir, args.logging_dir)
@@ -69,7 +93,6 @@ def main(args):
     block_kwargs = {"fused_attn": args.fused_attn, "qk_norm": args.qk_norm}
 
     # Initialize Base Model (SiT)
-    # Note: We use the original architecture.
     base_model = SiT_models[args.model](
         input_size=latent_size,
         num_classes=args.num_classes,
@@ -84,7 +107,6 @@ def main(args):
         state_dict = ckpt['model'] if 'model' in ckpt else ckpt
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
         
-        # strict=False allows loading even if checkpoint has extra keys (e.g. sigma)
         m, u = base_model.load_state_dict(state_dict, strict=False) 
         if accelerator.is_main_process:
             logger.info(f"Loaded frozen base model from {args.pretrained_ckpt}")
@@ -102,7 +124,7 @@ def main(args):
         base_model.to(dtype=torch.bfloat16)
 
     # ============================================================
-    # 3. Create Side Network (Trainable)
+    # 3. Create Side Network (Trainable) & EMA
     # ============================================================
     side_model = BASideNet(
         in_channels=args.SideNet_in_channels, 
@@ -112,6 +134,9 @@ def main(args):
     ).to(device)
     
     side_model.train() 
+
+    ema_side_model = EMAModel(side_model, decay=args.ema_decay)
+    ema_side_model.to(device)
 
     # ============================================================
     # 4. Optimizer (Only for SideNet)
@@ -153,7 +178,6 @@ def main(args):
     latents_bias = torch.tensor([0.]*4).view(1, 4, 1, 1).to(device)
 
     # 6. Prepare
-    # Only prepare SideNet and Optimizer. Base Model stays raw.
     side_model, optimizer, train_dataloader = accelerator.prepare(
         side_model, optimizer, train_dataloader
     )
@@ -166,7 +190,7 @@ def main(args):
     # Loss Function
     loss_fn = BALoss()
 
-    # 7. Resume Logic (For SideNet)
+    # 7. Resume Logic
     global_step = 0
     start_epoch = 0
     if args.resume_step > 0:
@@ -177,6 +201,14 @@ def main(args):
             # Load SideNet
             unwrapped_side = accelerator.unwrap_model(side_model)
             unwrapped_side.load_state_dict(ckpt['side_model'])
+
+            # Load EMA Model
+            if 'ema_side_model' in ckpt:
+                ema_side_model.model.load_state_dict(ckpt['ema_side_model'])
+            else:
+                logger.warning("No EMA state found in checkpoint. Re-initializing EMA from current SideNet state.")
+                ema_side_model = EMAModel(unwrapped_side, decay=args.ema_decay)
+                ema_side_model.to(device)
             
             # Load Optimizer
             optimizer.load_state_dict(ckpt['optimizer'])
@@ -220,6 +252,9 @@ def main(args):
                 optimizer.zero_grad()
 
             if accelerator.sync_gradients:
+                # 步进更新 EMA
+                unwrapped_side = accelerator.unwrap_model(side_model)
+                ema_side_model.step(unwrapped_side)
 
                 progress_bar.update(1)
                 global_step += 1
@@ -230,6 +265,7 @@ def main(args):
                         unwrapped_side = accelerator.unwrap_model(side_model)
                         state = {
                             'side_model': unwrapped_side.state_dict(),
+                            'ema_side_model': ema_side_model.model.state_dict(),
                             'optimizer': optimizer.state_dict(),
                             'step': global_step
                         }
@@ -239,22 +275,22 @@ def main(args):
 
                 # Sampling
                 if global_step % args.sampling_steps == 0:
-                    side_model.eval()
-                    # For sampling, use EMA model preferably
-                    # BA sampler is Single-anchor solver
+                    ema_side_model.model.eval()
                     with torch.no_grad():
-                        samples = BA_single_anchor_sampler(
-                            base_model=base_model,
-                            side_model=side_model, 
-                            latents=xT_sample,
-                            y=ys_sample,
-                            num_steps=args.num_steps, 
-                            nodes=args.nodes,
-                            cfg_scale=args.cfg_scale
-                        )
+                        with accelerator.autocast():
+                            samples = BA_single_anchor_sampler(
+                                base_model=base_model,
+                                side_model=ema_side_model.model, 
+                                latents=xT_sample,
+                                y=ys_sample,
+                                num_steps=args.num_steps, 
+                                nodes=args.nodes,
+                                cfg_scale=args.cfg_scale
+                            )
+                        
+                        samples = samples.to(torch.float32)
                         samples = vae.decode((samples - latents_bias) / latents_scale).sample
                         samples = (samples + 1) / 2.
-                    side_model.train()
                     if accelerator.is_main_process:
                         grid = array2grid(samples)
                         # Save
@@ -316,12 +352,14 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=4)
 
-    #SideNet
+    # SideNet
     parser.add_argument("--SideNet-depth", type=int, default=4)
     parser.add_argument("--SideNet-in-channels", type=int, default=4)
     parser.add_argument("--SideNet-base-channels", type=int, default=256)
     parser.add_argument("--SideNet-h-emb-dim", type=int, default=256)
 
+    # EMA
+    parser.add_argument("--ema-decay", type=float, default=0.9996, help="Decay rate for EMA model")
+
     args = parser.parse_args()
     main(args)
-
