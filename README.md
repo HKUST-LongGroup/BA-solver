@@ -76,7 +76,7 @@ accelerate launch --num_processes 1 train_BA_side.py \
   --exp-name <EXP_NAME> \
   --batch-size 96 \
   --learning-rate 0.0001 \
-  --SideNet-depth 8 \
+  --SideNet-depth 4 \
   --cfg-scale 4.0 \
   --sampling-steps 1000 \
   --checkpointing-steps 1000
@@ -102,24 +102,8 @@ torchrun --nnodes=1 --nproc_per_node=8 generate.py \
     --cfg-interval-start <CFG_START> \
 ```
 
-You can also generate ImageNet-512 images through the following script:
 
-```bash
-torchrun --nnodes=1 --nproc_per_node=8 generate.py \
-    --model SiT-XL/2 \
-    --resolution 512 \
-    --num-fid-samples 50000 \
-    --per-proc-batch-size 10 \
-    --base-ckpt <PRETRAINED_MODEL_PATH> \
-    --side-ckpt <SIDENET_MODEL_PATH> \
-    --SideNet-depth 8 \
-    --num-steps <STEPS> \
-    --sample-dir <OUTPUT_DIR> \
-    --cfg-scale <CFG> \
-    --cfg-interval-start <CFG_START> \
-```
-
-We provided SideNet checkpoints [here](https://huggingface.co/Daxuxu36/BA-solver-SideNet) for ImageNet-256 and -512 generation.
+We provided SideNet checkpoints [here](https://huggingface.co/Daxuxu36/BA-solver-SideNet) for ImageNet-256 generation.
 
 ### 5. Results
 Here are some visual samples on ImageNet-512 with only 7 NFEs. 
